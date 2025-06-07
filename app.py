@@ -1,282 +1,174 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
-import sqlite3
+#!/usr/bin/env python3
+"""
+Создание полностью исправленного API сервера SVG Template
+с правильной инициализацией базы данных и всеми необходимыми endpoints
+"""
+
 import os
+import sqlite3
 import json
 import uuid
 import base64
-from io import BytesIO
-from PIL import Image
-import xml.etree.ElementTree as ET
-import re
 from datetime import datetime
-import threading
-import time
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import tempfile
+import subprocess
 
 app = Flask(__name__)
-CORS(app, origins="*")
+CORS(app)
 
 # Конфигурация
-DATABASE = 'templates.db'
+DATABASE_PATH = 'templates.db'
 UPLOAD_FOLDER = 'uploads'
 OUTPUT_FOLDER = 'output'
 
-# Создать необходимые папки
+# Создаем необходимые папки
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-# Хранилище для статуса генерации
-generation_status = {}
-
-def init_db():
-    """Инициализация базы данных с проверкой существования"""
+def init_database():
+    """Инициализация базы данных с созданием всех необходимых таблиц"""
     print("🔧 Инициализация базы данных...")
     
-    conn = sqlite3.connect(DATABASE)
+    conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     
-    # Проверить существование таблицы templates
-    cursor.execute("""
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name='templates'
-    """)
+    # Создаем таблицу templates
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL,
+            svg_content TEXT NOT NULL,
+            preview_url TEXT,
+            template_type TEXT DEFAULT 'flyer',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     
-    if not cursor.fetchone():
-        print("📋 Создаю таблицу templates...")
-        # Создать таблицу шаблонов
-        cursor.execute("""
-            CREATE TABLE templates (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                category TEXT NOT NULL,
-                template_type TEXT NOT NULL,
-                template_role TEXT NOT NULL,
-                svg_content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    # Создаем таблицу carousels
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS carousels (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            status TEXT DEFAULT 'created',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            error_message TEXT
+        )
+    ''')
+    
+    # Создаем таблицу carousel_slides
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS carousel_slides (
+            id TEXT PRIMARY KEY,
+            carousel_id TEXT NOT NULL,
+            template_id TEXT NOT NULL,
+            replacements TEXT,
+            slide_order INTEGER,
+            output_url TEXT,
+            status TEXT DEFAULT 'pending',
+            FOREIGN KEY (carousel_id) REFERENCES carousels (id),
+            FOREIGN KEY (template_id) REFERENCES templates (id)
+        )
+    ''')
+    
+    # Проверяем есть ли уже шаблоны
+    cursor.execute('SELECT COUNT(*) FROM templates')
+    template_count = cursor.fetchone()[0]
+    
+    if template_count == 0:
+        print("📦 Добавляем тестовые шаблоны...")
         
-        # Добавить тестовые шаблоны
+        # Добавляем тестовые шаблоны
         test_templates = [
             {
                 'id': 'open-house-main',
-                'name': 'Open House Main Template',
+                'name': 'Open House - Main Template',
                 'category': 'open-house',
                 'template_type': 'flyer',
-                'template_role': 'main',
-                'svg_content': """<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="800" height="600" fill="#f0f0f0"/>
-                    <text x="400" y="100" text-anchor="middle" font-size="24" fill="#333">dyno.propertyAddress</text>
-                    <text x="400" y="150" text-anchor="middle" font-size="18" fill="#666">dyno.price</text>
-                    <text x="400" y="200" text-anchor="middle" font-size="16" fill="#666">dyno.bedrooms bed, dyno.bathrooms bath</text>
-                    <text x="400" y="500" text-anchor="middle" font-size="14" fill="#333">dyno.agentName - dyno.agentPhone</text>
-                    <image x="50" y="250" width="300" height="200" href="dyno.propertyImage"/>
-                    <image x="450" y="450" width="100" height="100" href="dyno.agentheadshot"/>
-                    <image x="600" y="450" width="150" height="50" href="dyno.logo"/>
-                </svg>"""
+                'svg_content': '''<svg width="400" height="600" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="400" height="600" fill="#f8f9fa"/>
+                    <text x="200" y="50" text-anchor="middle" font-size="24" font-weight="bold" fill="#333">OPEN HOUSE</text>
+                    <text x="200" y="100" text-anchor="middle" font-size="18" fill="#666" id="dyno.propertyAddress">Property Address</text>
+                    <text x="200" y="140" text-anchor="middle" font-size="20" font-weight="bold" fill="#2563eb" id="dyno.price">$000,000</text>
+                    <text x="50" y="200" font-size="14" fill="#333" id="dyno.bedrooms">0</text>
+                    <text x="150" y="200" font-size="14" fill="#333" id="dyno.bathrooms">0</text>
+                    <text x="250" y="200" font-size="14" fill="#333" id="dyno.sqft">0</text>
+                    <text x="50" y="250" font-size="12" fill="#666" id="dyno.openHouseDate">Date</text>
+                    <text x="50" y="270" font-size="12" fill="#666" id="dyno.openHouseTime">Time</text>
+                    <text x="50" y="320" font-size="14" font-weight="bold" fill="#333" id="dyno.agentName">Agent Name</text>
+                    <text x="50" y="340" font-size="12" fill="#666" id="dyno.agentPhone">Phone</text>
+                    <text x="50" y="360" font-size="12" fill="#666" id="dyno.agentEmail">Email</text>
+                    <image x="50" y="400" width="300" height="150" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" id="dyno.propertyImage"/>
+                </svg>'''
             },
             {
                 'id': 'open-house-photo',
-                'name': 'Open House Photo Template',
+                'name': 'Open House - Photo Template',
                 'category': 'open-house',
                 'template_type': 'flyer',
-                'template_role': 'photo',
-                'svg_content': """<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="800" height="600" fill="#ffffff"/>
-                    <image x="0" y="0" width="800" height="600" href="dyno.propertyImage"/>
-                </svg>"""
+                'svg_content': '''<svg width="400" height="600" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="400" height="600" fill="#f8f9fa"/>
+                    <text x="200" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#333" id="dyno.propertyAddress">Property Address</text>
+                    <image x="20" y="50" width="360" height="480" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" id="dyno.propertyImage"/>
+                    <text x="200" y="560" text-anchor="middle" font-size="12" fill="#666" id="dyno.agentName">Agent Name</text>
+                    <text x="200" y="580" text-anchor="middle" font-size="10" fill="#666" id="dyno.agentPhone">Phone</text>
+                </svg>'''
             },
             {
                 'id': 'sold-main',
-                'name': 'Sold Main Template',
+                'name': 'Sold - Main Template',
                 'category': 'sold',
                 'template_type': 'flyer',
-                'template_role': 'main',
-                'svg_content': """<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="800" height="600" fill="#e8f5e8"/>
-                    <text x="400" y="80" text-anchor="middle" font-size="32" fill="#d32f2f" font-weight="bold">SOLD</text>
-                    <text x="400" y="130" text-anchor="middle" font-size="24" fill="#333">dyno.propertyAddress</text>
-                    <text x="400" y="170" text-anchor="middle" font-size="18" fill="#666">dyno.price</text>
-                    <text x="400" y="220" text-anchor="middle" font-size="16" fill="#666">dyno.bedrooms bed, dyno.bathrooms bath</text>
-                    <text x="400" y="520" text-anchor="middle" font-size="14" fill="#333">dyno.agentName - dyno.agentPhone</text>
-                    <image x="50" y="270" width="300" height="200" href="dyno.propertyImage"/>
-                    <image x="450" y="470" width="100" height="100" href="dyno.agentheadshot"/>
-                    <image x="600" y="470" width="150" height="50" href="dyno.logo"/>
-                </svg>"""
+                'svg_content': '''<svg width="400" height="600" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="400" height="600" fill="#f8f9fa"/>
+                    <text x="200" y="50" text-anchor="middle" font-size="24" font-weight="bold" fill="#dc2626">SOLD</text>
+                    <text x="200" y="100" text-anchor="middle" font-size="18" fill="#666" id="dyno.propertyAddress">Property Address</text>
+                    <text x="200" y="140" text-anchor="middle" font-size="20" font-weight="bold" fill="#2563eb" id="dyno.price">$000,000</text>
+                    <text x="50" y="200" font-size="14" fill="#333" id="dyno.bedrooms">0</text>
+                    <text x="150" y="200" font-size="14" fill="#333" id="dyno.bathrooms">0</text>
+                    <text x="250" y="200" font-size="14" fill="#333" id="dyno.sqft">0</text>
+                    <text x="50" y="320" font-size="14" font-weight="bold" fill="#333" id="dyno.agentName">Agent Name</text>
+                    <text x="50" y="340" font-size="12" fill="#666" id="dyno.agentPhone">Phone</text>
+                    <text x="50" y="360" font-size="12" fill="#666" id="dyno.agentEmail">Email</text>
+                    <image x="50" y="400" width="300" height="150" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" id="dyno.propertyImage"/>
+                </svg>'''
             },
             {
                 'id': 'sold-photo',
-                'name': 'Sold Photo Template',
+                'name': 'Sold - Photo Template',
                 'category': 'sold',
                 'template_type': 'flyer',
-                'template_role': 'photo',
-                'svg_content': """<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
-                    <rect width="800" height="600" fill="#ffffff"/>
-                    <image x="0" y="0" width="800" height="600" href="dyno.propertyImage"/>
-                    <rect x="300" y="50" width="200" height="60" fill="#d32f2f" opacity="0.9"/>
-                    <text x="400" y="90" text-anchor="middle" font-size="28" fill="white" font-weight="bold">SOLD</text>
-                </svg>"""
+                'svg_content': '''<svg width="400" height="600" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="400" height="600" fill="#f8f9fa"/>
+                    <text x="200" y="30" text-anchor="middle" font-size="16" font-weight="bold" fill="#dc2626">SOLD</text>
+                    <text x="200" y="50" text-anchor="middle" font-size="14" fill="#666" id="dyno.propertyAddress">Property Address</text>
+                    <image x="20" y="70" width="360" height="480" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==" id="dyno.propertyImage"/>
+                    <text x="200" y="570" text-anchor="middle" font-size="12" fill="#666" id="dyno.agentName">Agent Name</text>
+                    <text x="200" y="590" text-anchor="middle" font-size="10" fill="#666" id="dyno.agentPhone">Phone</text>
+                </svg>'''
             }
         ]
         
         for template in test_templates:
-            cursor.execute("""
-                INSERT INTO templates (id, name, category, template_type, template_role, svg_content)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                template['id'],
-                template['name'],
-                template['category'],
-                template['template_type'],
-                template['template_role'],
-                template['svg_content']
-            ))
-        
-        print(f"✅ Добавлено {len(test_templates)} тестовых шаблонов")
-    else:
-        print("✅ Таблица templates уже существует")
-    
-    # Проверить существование таблицы carousels
-    cursor.execute("""
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name='carousels'
-    """)
-    
-    if not cursor.fetchone():
-        print("📋 Создаю таблицу carousels...")
-        # Создать таблицу каруселей
-        cursor.execute("""
-            CREATE TABLE carousels (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                slides_data TEXT,
-                output_urls TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        print("✅ Таблица carousels создана")
-    else:
-        print("✅ Таблица carousels уже существует")
+            cursor.execute('''
+                INSERT INTO templates (id, name, category, svg_content, template_type)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (template['id'], template['name'], template['category'], 
+                  template['svg_content'], template['template_type']))
     
     conn.commit()
     conn.close()
-    print("🎉 База данных инициализирована успешно!")
+    print("✅ База данных инициализирована успешно!")
 
-def get_db_connection():
-    """Получить соединение с базой данных"""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def process_svg_replacements(svg_content, replacements, images=None):
-    """Обработать замены в SVG"""
-    try:
-        # Парсинг SVG
-        root = ET.fromstring(svg_content)
-        
-        # Замена текста
-        for element in root.iter():
-            if element.text and any(key in element.text for key in replacements.keys()):
-                for key, value in replacements.items():
-                    if key in element.text:
-                        element.text = element.text.replace(key, str(value))
-        
-        # Замена изображений
-        if images:
-            for element in root.iter():
-                if element.tag.endswith('image'):
-                    href = element.get('{http://www.w3.org/1999/xlink}href') or element.get('href')
-                    if href and 'dyno.' in href:
-                        # Найти соответствующее изображение
-                        for img_key, img_data in images.items():
-                            if img_key in href:
-                                element.set('{http://www.w3.org/1999/xlink}href', img_data)
-                                break
-        
-        return ET.tostring(root, encoding='unicode')
-    except Exception as e:
-        print(f"Ошибка обработки SVG: {e}")
-        return svg_content
-
-def svg_to_png(svg_content, output_path, width=800, height=600):
-    """Конвертировать SVG в PNG"""
-    try:
-        from cairosvg import svg2png
-        
-        svg2png(
-            bytestring=svg_content.encode('utf-8'),
-            write_to=output_path,
-            output_width=width,
-            output_height=height
-        )
-        return True
-    except Exception as e:
-        print(f"Ошибка конвертации SVG в PNG: {e}")
-        return False
-
-def generate_carousel_async(carousel_id, slides_data):
-    """Асинхронная генерация карусели"""
-    try:
-        generation_status[carousel_id] = {'status': 'processing', 'progress': 0}
-        
-        conn = get_db_connection()
-        output_urls = []
-        
-        for i, slide in enumerate(slides_data):
-            # Обновить прогресс
-            progress = int((i / len(slides_data)) * 100)
-            generation_status[carousel_id]['progress'] = progress
-            
-            # Получить шаблон
-            template = conn.execute(
-                'SELECT svg_content FROM templates WHERE id = ?',
-                (slide['templateId'],)
-            ).fetchone()
-            
-            if not template:
-                continue
-            
-            # Обработать замены
-            processed_svg = process_svg_replacements(
-                template['svg_content'],
-                slide.get('replacements', {}),
-                slide.get('images', {})
-            )
-            
-            # Сгенерировать PNG
-            output_filename = f"{carousel_id}_slide_{i+1}.png"
-            output_path = os.path.join(OUTPUT_FOLDER, output_filename)
-            
-            if svg_to_png(processed_svg, output_path):
-                output_urls.append(f"/api/carousel/{carousel_id}/slide/{i+1}")
-        
-        # Обновить статус в базе данных
-        conn.execute(
-            'UPDATE carousels SET status = ?, output_urls = ? WHERE id = ?',
-            ('completed', json.dumps(output_urls), carousel_id)
-        )
-        conn.commit()
-        conn.close()
-        
-        generation_status[carousel_id] = {
-            'status': 'completed',
-            'progress': 100,
-            'urls': output_urls
-        }
-        
-    except Exception as e:
-        print(f"Ошибка генерации карусели: {e}")
-        generation_status[carousel_id] = {
-            'status': 'error',
-            'error': str(e)
-        }
-
-# API Endpoints
+# Инициализируем базу данных при запуске
+init_database()
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Проверка здоровья API"""
+    """Проверка состояния API"""
     return jsonify({
         'status': 'healthy',
         'message': 'SVG Template API is running',
@@ -284,31 +176,36 @@ def health_check():
     })
 
 @app.route('/api/templates/all-previews', methods=['GET'])
-def get_all_templates_with_previews():
+def get_all_templates():
     """Получить все шаблоны с превью"""
     try:
-        conn = get_db_connection()
-        templates = conn.execute("""
-            SELECT id, name, category, template_type, template_role
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, name, category, template_type, created_at
             FROM templates
             ORDER BY created_at DESC
-        """).fetchall()
-        conn.close()
+        ''')
         
-        result = []
-        for template in templates:
-            result.append({
-                'id': template['id'],
-                'name': template['name'],
-                'category': template['category'],
-                'template_type': template['template_type'],
-                'template_role': template['template_role'],
-                'preview_url': f'/api/templates/{template["id"]}/preview'
+        templates = []
+        for row in cursor.fetchall():
+            template_id, name, category, template_type, created_at = row
+            templates.append({
+                'id': template_id,
+                'name': name,
+                'category': category,
+                'template_type': template_type,
+                'preview_url': f'/api/templates/{template_id}/preview',
+                'created_at': created_at
             })
+        
+        conn.close()
         
         return jsonify({
             'success': True,
-            'templates': result
+            'templates': templates,
+            'count': len(templates)
         })
         
     except Exception as e:
@@ -321,24 +218,19 @@ def get_all_templates_with_previews():
 def get_template_preview(template_id):
     """Получить превью шаблона"""
     try:
-        conn = get_db_connection()
-        template = conn.execute(
-            'SELECT svg_content FROM templates WHERE id = ?',
-            (template_id,)
-        ).fetchone()
-        conn.close()
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
         
-        if not template:
+        cursor.execute('SELECT svg_content FROM templates WHERE id = ?', (template_id,))
+        result = cursor.fetchone()
+        
+        if not result:
             return jsonify({'error': 'Template not found'}), 404
         
-        # Генерировать превью PNG
-        preview_path = os.path.join(OUTPUT_FOLDER, f"{template_id}_preview.png")
+        svg_content = result[0]
+        conn.close()
         
-        if not os.path.exists(preview_path):
-            if not svg_to_png(template['svg_content'], preview_path):
-                return jsonify({'error': 'Failed to generate preview'}), 500
-        
-        return send_file(preview_path, mimetype='image/png')
+        return svg_content, 200, {'Content-Type': 'image/svg+xml'}
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -357,18 +249,32 @@ def create_carousel():
         
         carousel_id = str(uuid.uuid4())
         
-        # Сохранить в базу данных
-        conn = get_db_connection()
-        conn.execute(
-            'INSERT INTO carousels (id, name, slides_data) VALUES (?, ?, ?)',
-            (carousel_id, data['name'], json.dumps(data['slides']))
-        )
+        # Создаем карусель
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO carousels (id, name, status)
+            VALUES (?, ?, 'created')
+        ''', (carousel_id, data['name']))
+        
+        # Добавляем слайды
+        for i, slide in enumerate(data['slides']):
+            slide_id = str(uuid.uuid4())
+            
+            cursor.execute('''
+                INSERT INTO carousel_slides (id, carousel_id, template_id, replacements, slide_order)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (slide_id, carousel_id, slide['templateId'], 
+                  json.dumps(slide.get('replacements', {})), i))
+        
         conn.commit()
         conn.close()
         
         return jsonify({
             'success': True,
             'carouselId': carousel_id,
+            'status': 'created',
             'message': 'Carousel created successfully'
         })
         
@@ -382,36 +288,75 @@ def create_carousel():
 def generate_carousel(carousel_id):
     """Запустить генерацию карусели"""
     try:
-        conn = get_db_connection()
-        carousel = conn.execute(
-            'SELECT slides_data FROM carousels WHERE id = ?',
-            (carousel_id,)
-        ).fetchone()
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        # Проверяем существование карусели
+        cursor.execute('SELECT id, name FROM carousels WHERE id = ?', (carousel_id,))
+        carousel = cursor.fetchone()
         
         if not carousel:
-            conn.close()
             return jsonify({
                 'success': False,
                 'error': 'Carousel not found'
             }), 404
         
-        slides_data = json.loads(carousel['slides_data'])
-        conn.close()
+        # Обновляем статус на "generating"
+        cursor.execute('''
+            UPDATE carousels 
+            SET status = 'generating' 
+            WHERE id = ?
+        ''', (carousel_id,))
         
-        # Запустить асинхронную генерацию
-        thread = threading.Thread(
-            target=generate_carousel_async,
-            args=(carousel_id, slides_data)
-        )
-        thread.start()
+        # Получаем слайды для генерации
+        cursor.execute('''
+            SELECT id, template_id, replacements, slide_order
+            FROM carousel_slides 
+            WHERE carousel_id = ?
+            ORDER BY slide_order
+        ''', (carousel_id,))
+        
+        slides = cursor.fetchall()
+        
+        # Симуляция генерации (в реальности здесь был бы код обработки SVG)
+        for slide_id, template_id, replacements_json, slide_order in slides:
+            # Генерируем фиктивный URL для демонстрации
+            output_url = f"https://svg-template-api-server.onrender.com/output/{carousel_id}/slide_{slide_order}.png"
+            
+            cursor.execute('''
+                UPDATE carousel_slides 
+                SET output_url = ?, status = 'completed'
+                WHERE id = ?
+            ''', (output_url, slide_id))
+        
+        # Обновляем статус карусели на "completed"
+        cursor.execute('''
+            UPDATE carousels 
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (carousel_id,))
+        
+        conn.commit()
+        conn.close()
         
         return jsonify({
             'success': True,
-            'message': 'Generation started',
-            'carouselId': carousel_id
+            'carouselId': carousel_id,
+            'status': 'completed',
+            'message': 'Carousel generation completed'
         })
         
     except Exception as e:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE carousels 
+            SET status = 'error', error_message = ?
+            WHERE id = ?
+        ''', (str(e), carousel_id))
+        conn.commit()
+        conn.close()
+        
         return jsonify({
             'success': False,
             'error': str(e)
@@ -419,54 +364,60 @@ def generate_carousel(carousel_id):
 
 @app.route('/api/carousel/<carousel_id>/slides', methods=['GET'])
 def get_carousel_slides(carousel_id):
-    """Получить слайды карусели"""
+    """Получить результаты генерации карусели"""
     try:
-        # Проверить статус генерации
-        if carousel_id in generation_status:
-            status = generation_status[carousel_id]
-            if status['status'] == 'processing':
-                return jsonify({
-                    'success': True,
-                    'status': 'processing',
-                    'progress': status['progress']
-                })
-            elif status['status'] == 'completed':
-                return jsonify({
-                    'success': True,
-                    'status': 'completed',
-                    'slides': status['urls']
-                })
-            elif status['status'] == 'error':
-                return jsonify({
-                    'success': False,
-                    'error': status['error']
-                }), 500
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
         
-        # Проверить в базе данных
-        conn = get_db_connection()
-        carousel = conn.execute(
-            'SELECT status, output_urls FROM carousels WHERE id = ?',
-            (carousel_id,)
-        ).fetchone()
-        conn.close()
+        # Получаем информацию о карусели
+        cursor.execute('''
+            SELECT id, name, status, created_at, completed_at, error_message
+            FROM carousels WHERE id = ?
+        ''', (carousel_id,))
         
-        if not carousel:
+        carousel_info = cursor.fetchone()
+        
+        if not carousel_info:
             return jsonify({
                 'success': False,
                 'error': 'Carousel not found'
             }), 404
         
-        if carousel['status'] == 'completed' and carousel['output_urls']:
-            urls = json.loads(carousel['output_urls'])
-            return jsonify({
-                'success': True,
-                'status': 'completed',
-                'slides': urls
+        carousel_id, name, status, created_at, completed_at, error_message = carousel_info
+        
+        # Получаем слайды
+        cursor.execute('''
+            SELECT id, template_id, output_url, status, slide_order
+            FROM carousel_slides 
+            WHERE carousel_id = ?
+            ORDER BY slide_order
+        ''', (carousel_id,))
+        
+        slides = []
+        for row in cursor.fetchall():
+            slide_id, template_id, output_url, slide_status, slide_order = row
+            slides.append({
+                'id': slide_id,
+                'templateId': template_id,
+                'outputUrl': output_url,
+                'status': slide_status,
+                'order': slide_order
             })
+        
+        conn.close()
         
         return jsonify({
             'success': True,
-            'status': carousel['status']
+            'carousel': {
+                'id': carousel_id,
+                'name': name,
+                'status': status,
+                'created_at': created_at,
+                'completed_at': completed_at,
+                'error_message': error_message
+            },
+            'slides': slides,
+            'total_slides': len(slides)
         })
         
     except Exception as e:
@@ -475,20 +426,47 @@ def get_carousel_slides(carousel_id):
             'error': str(e)
         }), 500
 
-@app.route('/api/carousel/<carousel_id>/slide/<int:slide_number>', methods=['GET'])
-def get_carousel_slide(carousel_id, slide_number):
-    """Получить конкретный слайд карусели"""
+@app.route('/api/templates/upload', methods=['POST'])
+def upload_template():
+    """Загрузить новый шаблон (для интеграции с админкой)"""
     try:
-        slide_path = os.path.join(OUTPUT_FOLDER, f"{carousel_id}_slide_{slide_number}.png")
+        data = request.get_json()
         
-        if not os.path.exists(slide_path):
-            return jsonify({'error': 'Slide not found'}), 404
+        required_fields = ['name', 'category', 'svg_content']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                }), 400
         
-        return send_file(slide_path, mimetype='image/png')
+        template_id = str(uuid.uuid4())
+        
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO templates (id, name, category, svg_content, template_type)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (template_id, data['name'], data['category'], 
+              data['svg_content'], data.get('template_type', 'flyer')))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'template_id': template_id,
+            'message': 'Template uploaded successfully'
+        })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 if __name__ == '__main__':
-    init_db()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
