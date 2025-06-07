@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ИСПРАВЛЕННЫЙ API сервер SVG Template с РЕАЛЬНОЙ генерацией изображений
+ИСПРАВЛЕННЫЙ API сервер с правильными CORS настройками для agentflow-marketing-hub.vercel.app
 """
 
 import os
@@ -19,7 +19,19 @@ import io
 
 # Создаем Flask приложение
 app = Flask(__name__)
-CORS(app)
+
+# ИСПРАВЛЕННЫЕ CORS НАСТРОЙКИ для вашего домена
+CORS(app, 
+     origins=[
+         'https://agentflow-marketing-hub.vercel.app',
+         'http://localhost:3000',
+         'http://localhost:5173',
+         'https://vahgmyuowsilbxqdjjii.supabase.co'
+     ],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Accept', 'Authorization', 'apikey'],
+     supports_credentials=True
+)
 
 # Конфигурация
 DATABASE_PATH = 'templates.db'
@@ -220,13 +232,49 @@ def replace_svg_placeholders(svg_content, replacements):
 # Инициализируем базу данных при запуске
 init_database()
 
+# ДОБАВЛЯЕМ ОБРАБОТКУ OPTIONS REQUESTS
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({'status': 'ok'})
+        response.headers.add("Access-Control-Allow-Origin", "https://agentflow-marketing-hub.vercel.app")
+        response.headers.add('Access-Control-Allow-Headers', "Content-Type,Accept,Authorization,apikey")
+        response.headers.add('Access-Control-Allow-Methods', "GET,POST,PUT,DELETE,OPTIONS")
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        return response
+
+@app.after_request
+def after_request(response):
+    """Добавляем CORS заголовки ко всем ответам"""
+    origin = request.headers.get('Origin')
+    allowed_origins = [
+        'https://agentflow-marketing-hub.vercel.app',
+        'http://localhost:3000',
+        'http://localhost:5173',
+        'https://vahgmyuowsilbxqdjjii.supabase.co'
+    ]
+    
+    if origin in allowed_origins:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+    
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Accept,Authorization,apikey')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Проверка состояния API"""
     return jsonify({
         'status': 'healthy',
         'message': 'SVG Template API is running',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'cors_enabled': True,
+        'allowed_origins': [
+            'https://agentflow-marketing-hub.vercel.app',
+            'http://localhost:3000',
+            'http://localhost:5173'
+        ]
     })
 
 @app.route('/api/templates/all-previews', methods=['GET'])
@@ -309,6 +357,29 @@ def create_carousel():
             'status': 'created',
             'message': 'Carousel created successfully'
         })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# ДОБАВЛЯЕМ НЕДОСТАЮЩИЙ ENDPOINT
+@app.route('/api/carousel/create-and-generate', methods=['POST'])
+def create_and_generate_carousel():
+    """Создать карусель и сразу запустить генерацию"""
+    try:
+        # Сначала создаем карусель
+        create_response = create_carousel()
+        
+        if create_response.status_code != 200:
+            return create_response
+            
+        create_data = create_response.get_json()
+        carousel_id = create_data['carouselId']
+        
+        # Затем запускаем генерацию
+        return generate_carousel(carousel_id)
         
     except Exception as e:
         return jsonify({
@@ -487,12 +558,19 @@ def get_carousel_slides(carousel_id):
             'error': str(e)
         }), 500
 
-# НОВЫЙ ENDPOINT ДЛЯ СТАТИЧЕСКИХ ФАЙЛОВ
+# ENDPOINT ДЛЯ СТАТИЧЕСКИХ ФАЙЛОВ С ПРАВИЛЬНЫМИ CORS
 @app.route('/output/<path:filename>')
 def serve_output_file(filename):
-    """Отдает сгенерированные изображения"""
+    """Отдает сгенерированные изображения с правильными CORS заголовками"""
     try:
-        return send_from_directory(OUTPUT_FOLDER, filename)
+        response = send_from_directory(OUTPUT_FOLDER, filename)
+        
+        # Добавляем CORS заголовки для изображений
+        response.headers.add('Access-Control-Allow-Origin', 'https://agentflow-marketing-hub.vercel.app')
+        response.headers.add('Access-Control-Allow-Methods', 'GET')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        
+        return response
     except Exception as e:
         return jsonify({
             'success': False,
